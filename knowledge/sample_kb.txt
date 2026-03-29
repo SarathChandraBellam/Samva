@@ -1,0 +1,32 @@
+Samva Voice Agent - Knowledge Base Sample
+
+## About Samva
+Samva is a voice-enabled AI assistant powered by Google Gemini. It can answer questions
+based on documents stored in its knowledge base using retrieval-augmented generation (RAG).
+
+## Capabilities
+- Real-time voice conversations using Gemini Live API
+- Knowledge base search using Gemini File Search (RAG)
+- Supports 100+ document formats: PDF, Word, Excel, Markdown, plain text, source code
+- Automatic voice activity detection (VAD)
+- Natural barge-in support (interrupt the agent mid-response)
+
+## Setup Instructions
+1. Add your GEMINI_API_KEY to the .env file
+2. Upload documents: samva-setup-kb ./knowledge/
+3. Start the agent: samva-run
+
+## Commands
+- samva-setup-kb <path>        Upload files or directory to knowledge base
+- samva-setup-kb <path> --store <name>   Upload to a named store
+- samva-run                    Start the voice agent
+- samva-run --voice <name>     Use a specific voice (Kore, Puck, Charon, Fenrir, Aoede)
+- samva-run --store <name>     Connect to a specific knowledge base store
+- samva-run --verbose          Enable debug logging
+
+## Supported Voices
+- Kore (default) - Neutral, clear
+- Puck - Upbeat
+- Charon - Informative
+- Fenrir - Excitable
+- Aoede - Breezy
