@@ -13,6 +13,8 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "twilio>=9.0.0",
     "audioop-lts>=0.2.1; python_version >= '3.13'",
+    "sounddevice>=0.5.5",
+    "numpy>=2.4.4",
 ]
 
 [project.scripts]

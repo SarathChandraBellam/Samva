@@ -7,6 +7,8 @@ import sys
 from rich.console import Console
 from rich.panel import Panel
 
+from ..prompts import list_prompts
+
 console = Console()
 
 
@@ -23,8 +25,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Publicly reachable host:port for the Twilio stream URL "
-            "(e.g. abc123.ngrok.io). "
-            "Overrides SAMVA_PUBLIC_HOST env var."
+            "(e.g. abc123.ngrok.io). Overrides SAMVA_PUBLIC_HOST env var."
+        ),
+    )
+    p.add_argument(
+        "--prompt-template",
+        metavar="NAME",
+        default=None,
+        help=(
+            f"Prompt template to use for all calls. "
+            f"Available: {', '.join(list_prompts())}"
         ),
     )
     p.add_argument("--reload", action="store_true", help="Enable hot-reload (dev only)")
@@ -47,15 +57,19 @@ def main() -> None:
     if args.public_host:
         os.environ["SAMVA_PUBLIC_HOST"] = args.public_host
 
+    if args.prompt_template:
+        os.environ["SAMVA_PROMPT_TEMPLATE"] = args.prompt_template
+
     public_host = os.environ.get("SAMVA_PUBLIC_HOST", f"localhost:{args.port}")
     webhook_url = f"https://{public_host}/voice"
     stream_url = f"wss://{public_host}/media"
 
     console.print(
         Panel(
-            f"[bold]Listening:[/bold]    {args.host}:{args.port}\n"
-            f"[bold]Webhook URL:[/bold]  [cyan]{webhook_url}[/cyan]\n"
-            f"[bold]Stream URL:[/bold]   [cyan]{stream_url}[/cyan]\n\n"
+            f"[bold]Listening:[/bold]        {args.host}:{args.port}\n"
+            f"[bold]Webhook URL:[/bold]      [cyan]{webhook_url}[/cyan]\n"
+            f"[bold]Stream URL:[/bold]       [cyan]{stream_url}[/cyan]\n"
+            f"[bold]Prompt template:[/bold]  {args.prompt_template or 'default (from env)'}\n\n"
             "[dim]Set your Twilio phone number's Voice webhook to the Webhook URL above.\n"
             "Use ngrok or a public server to expose this port.[/dim]",
             title="[green]Samva Twilio Bridge[/green]",

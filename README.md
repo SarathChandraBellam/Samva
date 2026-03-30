@@ -1,307 +1,201 @@
-# Samva — AI Voice Call Agent
+# Samva — Real-Time Voice Agent on Gemini
 
-A real-time voice call agent powered by **Gemini 3.1 Flash Live** and **Gemini File Search (RAG)**. Call a real phone number, speak naturally, and the agent searches your knowledge base and answers in human-like voice — all in real time.
+Samva is a framework for building voice agents that handle real phone calls. You give it a personality, optionally a knowledge base and tools, and it handles the rest: listening, thinking, and speaking — all in real time.
 
-Built on two Gemini capabilities launched in 2025:
-- **[Gemini 3.1 Flash Live](https://blog.google/innovation-and-ai/technology/developers-tools/build-with-gemini-3-1-flash-live/)** — low-latency bidirectional voice streaming with barge-in, VAD, and 90+ language support
-- **[Gemini File Search](https://blog.google/innovation-and-ai/technology/developers-tools/file-search-gemini-api/)** — fully managed RAG: upload documents, query semantically with a single API call
+It is built on two Gemini capabilities:
+
+- **Gemini Live API** — bidirectional audio streaming with voice activity detection, barge-in support, and 90+ languages. The model hears the caller speak and responds in natural voice without any intermediate speech-to-text or text-to-speech pipeline.
+- **Gemini File Search** — fully managed RAG. Upload your documents once; query them with a single API call. No vector database, no embeddings code, no retrieval plumbing to maintain.
 
 ---
 
-## What We Built
+## Core Idea
 
-### The Idea
-Use the two new Gemini APIs together: **Live API** for real-time phone call audio, and **File Search** as a grounded knowledge base. When a caller asks a question, the Live model detects it needs domain knowledge, calls `search_knowledge_base`, gets a RAG answer, and speaks it back — all within the conversation flow.
+Traditional voice bots work like this: speech → STT → NLP → response → TTS → speech. Latency compounds at every step.
 
-### Architecture
+Gemini Live API collapses the entire pipeline. The model receives raw audio, reasons over it, and returns raw audio. When it needs domain knowledge it calls a tool (`search_knowledge_base`), gets the RAG answer back, and speaks a grounded response — all within a single live session.
 
 ```
-📞 Caller dials Twilio number
-         │
-         ▼  POST /voice (TwiML)
-   FastAPI server
-         │  wss://.../media (bidirectional WebSocket)
-         ▼
+Caller
+  │  raw audio (PCM / µ-law)
+  ▼
+Gemini Live API  ──── function call ───▶  Gemini File Search
+  │                                              │
+  │  ◀──────────────── RAG answer ──────────────┘
+  │
+  ▼  raw audio response
+Caller hears the answer
+```
+
+The two Gemini APIs communicate server-to-server. No audio is ever converted to text by your code — the model handles transcription, reasoning, and synthesis natively.
+
+---
+
+## What Can You Build
+
+| Mode | How | Use case |
+|------|-----|----------|
+| Plain voice agent | `samva-run` | Conversational assistant, demo, prototype |
+| Knowledge-grounded agent | Add KB store | FAQ bot, product support, internal helpdesk |
+| Agent with custom tools | Register any tool | Appointment booking, CRM lookup, order status |
+| Phone call agent | `samva-serve` + Twilio | Real inbound/outbound calls over PSTN |
+
+Read the guides in [`docs/`](docs/) to see each mode with minimal code changes.
+
+---
+
+## How Gemini APIs Are Used
+
+### Gemini Live API (`gemini-3.1-flash-live-preview`)
+
+The session opens a persistent WebSocket to `client.aio.live.connect(model, config)`. Once connected:
+
+- Your code streams raw PCM audio chunks from the microphone (or Twilio) via `session.send_realtime_input(audio=...)`.
+- The model streams audio back in `message.server_content.model_turn.parts` as raw PCM.
+- Voice activity detection and turn management are handled by the model — you do not need to segment speech or detect silence.
+- Tool declarations are passed in `LiveConnectConfig.tools` at session start. When the model decides to call a tool, it emits a `tool_call` message. Your code executes the tool and calls `session.send_tool_response(...)`.
+
+### Gemini File Search (RAG)
+
+Documents are uploaded once with `client.files.upload()` and indexed into a File Search store. At query time:
+
+```python
+response = client.models.generate_content(
+    model="gemini-1.5-flash",
+    contents=query,
+    config=types.GenerateContentConfig(
+        tools=[types.Tool(file_search=types.FileSearch(file_ids=[...]))]
+    ),
+)
+```
+
+The model retrieves relevant chunks, reasons over them, and returns a grounded answer. No local retrieval code needed.
+
+### How They Connect
+
+The Live API model is configured with a `search_knowledge_base` function declaration. When the caller asks a domain-specific question, the Live model emits a function call. The session handler calls the File Search API, gets the answer, and sends it back as a `FunctionResponse`. The Live model then speaks the grounded answer.
+
+---
+
+## Architecture
+
+```
+Local mic mode
+──────────────
+  Microphone
+      │ PCM 16kHz
+      ▼
+  AudioCapture (sounddevice)
+      │ echo-gated PCM chunks
+      ▼
+  LiveVoiceSession  ──── tool call ───▶  KnowledgeBaseTool
+      │                                        │
+      │  ◀──────────── RAG answer ────────────┘
+      ▼
+  AudioPlayer (sounddevice)
+      │ PCM 24kHz
+      ▼
+  Speakers
+
+
+Phone call mode
+───────────────
+  Caller dials Twilio number
+      │ POST /voice
+      ▼
+  FastAPI (samva-serve)  →  TwiML: connect WebSocket
+      │ wss://.../media
+      ▼
   TwilioCallSession
-  ┌──────────────────────────────────────────────┐
-  │  Twilio audio (µ-law 8kHz base64)            │
-  │    → ulaw2lin → ratecv 8k→16k               │
-  │    → Gemini Live (PCM 16kHz)                 │
-  │                                              │
-  │  Gemini Live (gemini-3.1-flash-live-preview) │
-  │    ↕  function call: search_knowledge_base   │
-  │         → Gemini File Search RAG             │
-  │           (gemini-2.0-flash + your docs)     │
-  │                                              │
-  │  Gemini audio out (PCM 24kHz)               │
-  │    → ratecv 24k→8k → lin2ulaw              │
-  │    → Twilio (µ-law 8kHz base64)             │
-  └──────────────────────────────────────────────┘
-         │
-         ▼
-   📞 Caller hears the answer
-```
-
-### Two Modes
-
-| Mode | Command | Use case |
-|------|---------|----------|
-| **Local mic** | `samva-run` | Test on your laptop with mic + speakers |
-| **Phone call** | `samva-serve` | Real phone calls via Twilio |
-
----
-
-## Technology Stack
-
-| Component | Technology | Why |
-|-----------|-----------|-----|
-| Voice conversation | Gemini 3.1 Flash Live | Real-time bidirectional audio, VAD, barge-in |
-| Knowledge base | Gemini File Search | Managed RAG, 100+ file formats, semantic search |
-| Audio RAG search | gemini-2.0-flash | Fast, stable, supports File Search tool |
-| Phone calls | Twilio Media Streams | WebSocket audio bridge for PSTN calls |
-| Web server | FastAPI + Uvicorn | Async WebSocket handling for concurrent calls |
-| Audio conversion | audioop (stdlib) | µ-law ↔ PCM, 8/16/24kHz resampling |
-| Package manager | uv | Fast Python dependency management |
-
----
-
-## Project Structure
-
-```
-samva/
-├── src/samva/
-│   ├── config.py               # All settings, env-var driven
-│   ├── agent/
-│   │   └── agent.py            # VoiceAgent: wires KB + Live session (local mode)
-│   ├── live/
-│   │   ├── audio.py            # PyAudio mic capture + speaker playback
-│   │   └── session.py          # Gemini Live session (local mode)
-│   ├── knowledge_base/
-│   │   ├── manager.py          # Create/upload/search File Search stores
-│   │   └── loader.py           # Discover supported files in a directory
-│   ├── twilio_bridge/
-│   │   ├── app.py              # FastAPI: POST /voice (TwiML) + WS /media
-│   │   ├── call_session.py     # Per-caller Gemini Live session + KB tool
-│   │   └── audio_conv.py       # µ-law ↔ PCM conversion (stateful)
-│   └── cli/
-│       ├── setup_kb.py         # samva-setup-kb
-│       ├── run.py              # samva-run
-│       └── serve.py            # samva-serve
-├── knowledge/
-│   └── sample_kb.txt           # Sample knowledge base document
-├── scripts/
-│   └── setup_twilio.py         # Buy & configure a Twilio phone number
-├── .env.example
-└── pyproject.toml
+      │ µ-law 8kHz  ──▶  AudioConverter  ──▶  PCM 16kHz
+      │                                           │
+      │                                    Gemini Live API
+      │                                           │
+      │ µ-law 8kHz  ◀──  AudioConverter  ◀──  PCM 24kHz
+      ▼
+  Caller hears the answer
 ```
 
 ---
 
-## Prerequisites
+## Project Layout
 
-- **Python 3.11+**
-- **[uv](https://docs.astral.sh/uv/)** — `pip install uv`
-- **[Gemini API key](https://aistudio.google.com/app/apikey)** — from Google AI Studio
-- **[PortAudio](https://www.portaudio.com/)** — for local mic mode: `brew install portaudio`
-- *(Phone mode)* **[Twilio account](https://twilio.com)** — Account SID + Auth Token + a purchased phone number
-- *(Phone mode)* **[ngrok](https://ngrok.com)** — `brew install ngrok` — to expose local server
+```
+src/samva/
+├── agent/          VoiceAgent — wires everything together for local mic mode
+├── cli/            samva-run, samva-serve, samva-setup-kb commands
+├── config/         Config, ModelConfig, AudioConfig — env-var driven
+├── knowledge_base/ Upload documents, manage File Search stores
+├── live/           AudioCapture, AudioPlayer, LiveVoiceSession
+├── prompts/        System prompt templates (plain .py modules with PROMPT string)
+├── providers/      LLMProvider protocol + GeminiProvider implementation
+├── tools/          BaseTool protocol, ToolRegistry, built-in tools
+└── twilio_bridge/  FastAPI app, TwilioCallSession, µ-law↔PCM audio converter
+```
+
+Tools are plug-in / plug-out at runtime via `ToolRegistry.register()` and `.unregister()`. Prompts are swappable via `--prompt-template`. The LLM provider is behind a protocol — swap Gemini for any other backend without touching session code.
 
 ---
 
-## Setup
+## Quickstart
 
-### 1. Install
+### Prerequisites
+
+- Python 3.11+
+- `uv` — `pip install uv`
+- [Gemini API key](https://aistudio.google.com/app/apikey)
+- PortAudio (for local mic): `brew install portaudio`
+
+### Install
 
 ```bash
 git clone <repo-url> && cd samva
 uv sync
 ```
 
-### 2. Configure
+### Configure
 
 ```bash
 cp .env.example .env
+# Edit .env and set GEMINI_API_KEY
 ```
 
-Edit `.env`:
-
-```env
-GEMINI_API_KEY=your_key_here
-SAMVA_LIVE_MODEL=gemini-3.1-flash-live-preview
-SAMVA_SEARCH_MODEL=gemini-2.0-flash
-
-# Phone mode only
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=your_auth_token
-```
-
-### 3. Seed the Knowledge Base
-
-Upload your documents (PDF, TXT, MD, DOCX, etc.):
+### Run
 
 ```bash
-# Single file
-uv run samva-setup-kb ./my-document.pdf
-
-# Entire directory
-uv run samva-setup-kb ./docs/
-
-# Check what's indexed
-uv run samva-setup-kb ./knowledge/ --list
-```
-
-The first call creates a File Search store in your Gemini project. Subsequent calls add to the same store — you only need to re-run this when you want to add new documents.
-
----
-
-## Running — Local Mic Mode
-
-```bash
+# Local mic — speaks back through your speakers
 uv run samva-run
+
+# Phone calls via Twilio
+uv run samva-serve --public-host your-ngrok-host.ngrok-free.app
 ```
-
-Speak into your microphone. The agent listens, searches the KB, and responds through your speakers.
-
-```bash
-# Options
-uv run samva-run --voice Puck           # change voice
-uv run samva-run --store my-store       # use a named KB store
-uv run samva-run --verbose              # debug logging
-```
-
-Press **Ctrl+C** to stop.
 
 ---
 
-## Running — Phone Call Mode
+## Guides
 
-### Step 1 — Start ngrok (keep this terminal open)
-
-```bash
-ngrok http 8000
-# Copy the https://xxxx.ngrok-free.app URL
-```
-
-### Step 2 — Buy a Twilio number and wire the webhook (one-time)
-
-```bash
-uv run python scripts/setup_twilio.py --ngrok-url https://xxxx.ngrok-free.app
-```
-
-Output:
-```
-Purchasing +1XXXXXXXXXX …
-  Purchased: +1XXXXXXXXXX
-  Webhook set to: https://xxxx.ngrok-free.app/voice
-```
-
-If you already own a number and just need to update the webhook after ngrok restarts:
-```bash
-uv run python scripts/setup_twilio.py --ngrok-url https://new-url.ngrok-free.app --update-only
-```
-
-### Step 3 — Start the server
-
-```bash
-uv run samva-serve --public-host xxxx.ngrok-free.app
-```
-
-### Step 4 — Call the number
-
-Dial the Twilio number from your phone. You'll hear the agent greet you. Ask anything — it searches the KB and responds in real time.
+| Guide | What it covers |
+|-------|---------------|
+| [Plain voice agent](docs/plain-agent.md) | Run without a knowledge base — just a voice personality |
+| [With knowledge base](docs/with-knowledge-base.md) | Ground answers in your documents |
+| [Custom tools](docs/custom-tools.md) | Add appointment booking or any other tool |
 
 ---
 
-## Configuration Reference
+## Available Voices
+
+`Kore` (default) · `Puck` · `Charon` · `Fenrir` · `Aoede`
+
+## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GEMINI_API_KEY` | *(required)* | Google AI Studio API key |
-| `SAMVA_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Gemini Live model for conversation |
-| `SAMVA_SEARCH_MODEL` | `gemini-2.0-flash` | Model used for File Search RAG queries |
-| `SAMVA_KB_STORE_NAME` | `samva-knowledge-base` | File Search store display name |
+| `GEMINI_API_KEY` | required | Google AI Studio API key |
+| `SAMVA_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live conversation model |
+| `SAMVA_SEARCH_MODEL` | `gemini-1.5-flash` | Model for KB RAG queries |
+| `SAMVA_ENABLE_KB` | `true` | Set to `false` to disable knowledge base entirely |
+| `SAMVA_KB_STORE_NAME` | `samva-knowledge-base` | File Search store name |
 | `SAMVA_VOICE` | `Kore` | Agent voice |
-| `SAMVA_SYSTEM_PROMPT` | *(see config.py)* | System instructions for the agent |
-| `SAMVA_PUBLIC_HOST` | `localhost:8000` | Public host for TwiML stream URL |
-| `TWILIO_ACCOUNT_SID` | — | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | — | Twilio auth token |
-
-### Available Voices
-
-| Voice | Style |
-|-------|-------|
-| `Kore` | Neutral, clear (default) |
-| `Puck` | Upbeat |
-| `Charon` | Informative |
-| `Fenrir` | Excitable |
-| `Aoede` | Breezy |
-
----
-
-## How the Audio Bridge Works
-
-Twilio and Gemini use incompatible audio formats. `audio_conv.py` converts between them on every chunk:
-
-```
-Twilio in:   base64( µ-law, 8kHz, 8-bit )
-                ↓  base64.b64decode
-                ↓  audioop.ulaw2lin(2)      → PCM 16-bit @ 8kHz
-                ↓  audioop.ratecv(8k→16k)   → PCM 16-bit @ 16kHz
-Gemini in:   raw bytes, PCM 16kHz 16-bit
-
-Gemini out:  raw bytes, PCM 24kHz 16-bit
-                ↓  audioop.ratecv(24k→8k)   → PCM 16-bit @ 8kHz
-                ↓  audioop.lin2ulaw(2)       → µ-law 8-bit @ 8kHz
-                ↓  base64.b64encode
-Twilio out:  base64( µ-law, 8kHz, 8-bit )
-```
-
-The converter is stateful — it maintains `audioop.ratecv` filter state across chunks for smooth resampling without artefacts.
-
----
-
-## How the KB Tool Call Works
-
-The Live model has one tool declared: `search_knowledge_base(query: str)`.
-
-When the caller asks something domain-specific, the model emits a tool call. The session handler:
-1. Sends `"One moment please."` as text input so Gemini speaks a hold phrase
-2. Calls `KnowledgeBaseManager.search()` which runs `generate_content` with the `file_search` tool against your store
-3. Returns the RAG answer as a `FunctionResponse`
-4. Gemini speaks the grounded answer
-
-The search has a **10-second timeout** — if the model is overloaded it falls back to general knowledge and the call continues.
-
----
-
-## Issues We Hit and Fixed
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| `AttributeError: result` on upload | `UploadToFileSearchStoreOperation` has no `.result()` | Poll with `client.operations.get(op)` until `op.done` |
-| Call connects but drops immediately | `"LOW"` is not a valid `EndSensitivity` value | Use `types.EndSensitivity.END_SENSITIVITY_LOW` |
-| Agent speaks but ignores caller | Both inbound + outbound Twilio tracks were sent to Gemini | Filter to `track == "inbound"` only |
-| Audio queue fills, drops all speech | `put_nowait` with maxsize=300 filled during agent output | Unbounded `asyncio.Queue()` with blocking `await put()` |
-| 42-second KB search kills the call | `gemini-3-flash-preview` preview model overloaded | Switch search model to `gemini-2.0-flash` + 10s timeout |
-| Caller hears silence during KB search | No feedback while waiting for RAG result | Inject `"One moment please."` text before search starts |
-
----
-
-## Supported File Types for Knowledge Base
-
-PDF · DOCX · XLSX · PPTX · TXT · MD · JSON · YAML · CSV · HTML · XML · Python · JavaScript · TypeScript · Java · Go · Rust · C/C++ · Shell · and 80+ more formats via Gemini File Search.
-
----
-
-## Dependencies
-
-```toml
-google-genai    # Gemini Live API + File Search
-pyaudio         # Mic/speaker I/O (local mode)
-fastapi         # Async HTTP + WebSocket server
-uvicorn         # ASGI server
-twilio          # Twilio REST SDK
-python-dotenv   # .env loading
-rich            # Terminal UI
-audioop-lts     # audioop backport for Python 3.13+
-```
+| `SAMVA_SYSTEM_PROMPT` | — | Override system prompt inline |
+| `SAMVA_PROMPT_TEMPLATE` | `default` | Template name from `prompts/` |
+| `SAMVA_PUBLIC_HOST` | `localhost:8000` | Public host for Twilio stream URL |
